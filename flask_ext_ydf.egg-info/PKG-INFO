@@ -1,0 +1,268 @@
+Metadata-Version: 2.1
+Name: flask-ext-ydf
+Version: 1.2
+Summary: flask decorators check with cerberus,flask return result auto convet
+Home-page: UNKNOWN
+Author: bfzs
+Author-email: m13148804508@163.com
+Maintainer: ydf
+Maintainer-email: m13148804508@163.com
+License: BSD License
+Description: ## 1. pip install flask_ext_ydf
+        
+        1.自动使用redis统计每个ip和每个接口的访问次数
+        
+        2.自动返回code  data message 三个字段格式的json。
+        兼容flask接口已经返回了完整json和返回 列表 数组
+        
+        3. 使用装饰器做参数校验，校验格式使用cerberus包的语法。
+        
+        ```python
+        """
+        各种flask 扩展
+        """
+        import os
+        import traceback
+        import random
+        import base64
+        import functools
+        from bson import json_util
+        import json
+        
+        import redis
+        from flask import current_app, request, Flask
+        from flask.globals import _request_ctx_stack
+        from cerberus import Validator
+        from nb_log import LogManager, LoggerMixin
+        
+        flask_error_logger = LogManager('flask_error').get_logger_and_add_handlers(log_filename='flask_error.log')
+        flask_record_logger = LogManager('flask_record').get_logger_and_add_handlers(log_filename='flask_record.log')
+        
+        
+        class FlaskIpStatistics():
+            """
+            自动统计每个接口的访问情况
+            """
+        
+            def __init__(self, app=None):
+                self.app = app
+                if app is not None:
+                    self.init_app(app, )
+        
+            def init_app(self, app: Flask):
+                if 'REDSI_URL' not in app.config:
+                    raise LookupError('请在flask的config 配置中指明 REDSI_URL 的连接配置')
+                if 'SHOW_IP_STATISTIC_PATH' not in app.config:
+                    raise LookupError('请在flask的config 配置中指明 SHOW_IP_STATISTIC_PATH 的配置,用来返回ip访问情况')
+                if 'REDSI_KEY_PREFIX_FOR_STATISTICS' not in app.config:
+                    raise LookupError('请在flask的config 配置中指明 REDSI_KEY_PREFIX_FOR_STATISTICS 的配置')
+                if 'SHOW_IP_STATISTIC_PATH' not in app.config:
+                    raise LookupError('请在flask的config 配置中指明 SHOW_IP_STATISTIC_PATH 的配置,用来返回ip访问情况')
+                self._redsi_key_prefix_of_app = app.config['REDSI_KEY_PREFIX_FOR_STATISTICS']
+                self._redis_db_for_ip_statistic = redis.Redis.from_url(app.config['REDSI_URL'])
+        
+                app.before_request_funcs.setdefault(None, []).append(self._inrc_ip)
+                app.add_url_rule(app.config['SHOW_IP_STATISTIC_PATH'], '', self._show_count, methods=['GET', ])
+        
+            @staticmethod
+            def _get_user_ip():
+                if request.headers.get('X-Forwarded-For'):
+                    user_ip = request.headers['X-Forwarded-For']
+                elif request.headers.get('X-Real-IP'):
+                    user_ip = request.headers.get('X-Real-IP')
+                else:
+                    user_ip = request.remote_addr
+                return user_ip.split(',')[0]
+        
+            def _inrc_ip(self):
+                print(request.path)
+                ip_key_name = f'''{self._redsi_key_prefix_of_app}:{request.path}:{self._get_user_ip()}'''
+                print(f'执行inrc    {ip_key_name}')
+                if self._redis_db_for_ip_statistic.exists(ip_key_name):
+                    self._redis_db_for_ip_statistic.incr(ip_key_name, 1)
+                else:
+                    with self._redis_db_for_ip_statistic.pipeline() as p:
+                        p.incr(ip_key_name, 1)
+                        p.expire(ip_key_name, 3600)
+                        p.execute()
+        
+            def _show_count(self):
+                # 显示每个ip的访问次数
+                # return 'aaaaa'
+        
+                key_iters = self._redis_db_for_ip_statistic.scan_iter(f'{self._redsi_key_prefix_of_app}:*')
+                ip__count_map = {key.decode(): self._redis_db_for_ip_statistic.get(key).decode() for key in key_iters}
+                return {'count': len(ip__count_map), 'ip__count_map': ip__count_map}
+        
+        
+        def api_return_deco(v):
+            """
+            对flask的返回 加一个固定的状态码。在测试环境即使是非debug，直接在错误信息中返回错误堆栈。在生产环境使用随机四位字母 加 错误信息的base64作为错误信息。
+            :param v:视图函数
+            :return:
+            """
+            flask_request = request
+        
+            @functools.wraps(v)
+            def _api_return_deco(*args, **kwargs):
+                # noinspection PyBroadException
+                try:
+                    data = v(*args, **kwargs)
+                    if isinstance(data, str):
+                        result = data
+                    else:
+                        if 'code' in data and 'data' in data:
+                            result = json_util.dumps(data)
+                        else:
+                            result = json_util.dumps({
+                                "code": 200,
+                                "data": data,
+                                "message": "SUCCESS"}, ensure_ascii=False)
+                    flask_record_logger.debug(
+                        f'请求路径：{flask_request.path}  请求参数：{json.dumps(flask_request.values.to_dict())},返回正常,结果长度是{len(result)}')
+                    return result
+                except Exception as e:
+                    except_str0 = f'请求路径：{flask_request.path}  请求参数：{json.dumps(flask_request.values.to_dict())} ,出错了 {type(e)} {e} {traceback.format_exc()}'.replace(
+                        '\n', '<br>')
+                    flask_error_logger.exception(except_str0)
+                    exception_str_encode = base64.b64encode(except_str0.encode()).decode().replace('=', '').strip()
+                    message = except_str0 if os.environ.get(
+                        'IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE') == '1' else f'''
+                    {"".join(random.sample("abcdefghijklmnopqrstABCDEFGHIJKLMNOPQRST", 4))}{exception_str_encode}'''
+                    return json.dumps({
+                        "code": 500,
+                        "data": None,
+                        "message": message}, ensure_ascii=False)
+        
+            return _api_return_deco
+        
+        
+        flask_api_result_deco = api_return_deco
+        
+        
+        def _dispatch_request_with_flask_api_result_deco(self):
+            """Does the request dispatching.  Matches the URL and returns the
+            return value of the view or error handler.  This does not have to
+            be a response object.  In order to convert the return value to a
+            proper response object, call :func:`make_response`.
+        
+            .. versionchanged:: 0.7
+               This no longer does the exception handling, this code was
+               moved to the new :meth:`full_dispatch_request`.
+            """
+            req = _request_ctx_stack.top.request
+            if req.routing_exception is not None:
+                self.raise_routing_exception(req)
+            rule = req.url_rule
+            # if we provide automatic options for this URL and the
+            # request came with the OPTIONS method, reply automatically
+            if getattr(rule, 'provide_automatic_options', False) \
+                    and req.method == 'OPTIONS':
+                return self.make_default_options_response()
+            # otherwise dispatch to the handler for that endpoint
+            # return self.view_functions[rule.endpoint](**req.view_args)
+            v = self.view_functions[rule.endpoint]
+            v2 = flask_api_result_deco(v)
+            return v2(**req.view_args)
+        
+        
+        class CustomFlaskApiConversion(LoggerMixin):
+            """
+            自动转化每个接口的返回，自动将各种类型转成code data message格式的json
+            """
+        
+            def __init__(self, app=None):
+                self.app = app
+                if app is not None:
+                    self.init_app(app, )
+        
+            def monkey_patch_dispatch_request(self):
+                self.logger.warn('改变了flask的dispatch_request 方法')
+                Flask.dispatch_request = _dispatch_request_with_flask_api_result_deco
+        
+            def init_app(self, app: Flask):
+                if 'IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE' not in app.config:
+                    self.logger.warning(
+                        'flask的config没有配置 IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE，则默认为"0"，使用密文')
+                    os.environ.setdefault('IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE', '0')
+                app.before_first_request_funcs.append(self.monkey_patch_dispatch_request)  # 直接把返回装饰器加到app上，免得每个接口加一次装饰器麻烦。
+        
+        
+        def flask_check_param_deco(schema, ):
+            """
+            自动检查参数，返回400 code
+            :param schema:
+            :return:
+            """
+        
+            def _check_param_deco(v):
+                @functools.wraps(v)
+                def ___check_param_deco(*ags, **kwargs):
+                    request_values = {}
+                    print(request.values)
+                    if request.values:
+                        request_values = request.values.to_dict()
+                    if request.json:
+                        request_values.update(request.json)
+                    # print(request_values)
+                    # print(schema)
+                    vd = Validator()
+                    vd.allow_unknown = True
+                    # document, schema=None
+                    is_ok = vd.validate(request_values, schema)
+                    check_errors = None
+                    if is_ok is False:
+                        check_errors = vd.errors
+                    if is_ok:
+                        return v(*ags, **kwargs)
+                    else:
+                        return {'code': 400,
+                                'message': check_errors,
+                                'data': None}
+        
+                return ___check_param_deco
+        
+            return _check_param_deco
+        
+        
+        if __name__ == '__main__':
+            schemax = {"x": {'type': 'string', 'empty': False, 'nullable': False, 'required': True}}
+        
+            app = Flask(__name__)
+            app.config['REDSI_URL'] = 'redis://127.0.0.1/0'
+            app.config['REDSI_KEY_PREFIX_FOR_STATISTICS'] = 'flask_test1'
+            app.config['SHOW_IP_STATISTIC_PATH'] = '/proj/ip_st'
+            FlaskIpStatistics(app)
+            CustomFlaskApiConversion(app)
+        
+        
+            @app.route('/', methods=['get'])
+            def index():
+                return 'hello'
+        
+        
+            @app.route('/list', methods=['get', 'post'])
+            @flask_check_param_deco(schemax, )
+            def listx():
+                """
+                {"code": 200, "data": ["dsd"], "message": "SUCCESS"}
+                :return:
+                """
+                return ['dsd', 'lalala']  # 可以直接返回字典 和列表类型，不需要json dumps。
+        
+        
+            app.run()
+        
+        
+        ``` 
+Keywords: flask,cerberus
+Platform: all
+Classifier: Development Status :: 4 - Beta
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: BSD License
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: Implementation
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Topic :: Software Development :: Libraries
+Description-Content-Type: text/markdown
