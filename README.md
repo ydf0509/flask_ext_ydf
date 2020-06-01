@@ -19,6 +19,12 @@ console.info(ooo.getHeaders());
 console.info(JSON.stringify(ooo.getHeaders()));
 ```
 
+5.自动日志记录，错误日志和正常日志自动记录到不同文件
+
+配置钉钉后，函数云心出错可以自动空频报警。
+
+
+
 ```python
 """
 各种flask 扩展
