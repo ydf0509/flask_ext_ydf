@@ -5,31 +5,51 @@
 2.自动返回code  data message 三个字段格式的json。
 兼容flask接口已经返回了完整json和返回 列表 数组
 
-3. 使用装饰器做参数校验，校验格式使用cerberus包的语法。
+3.使用装饰器做参数校验，校验格式使用cerberus包的语法。
+
+4.自动加密任意请求参数的接口。前端需要配合js文件apiEncr，后端使用相同逻辑验证。
+
+如果不通过，则拒绝请求，避免后端web处理大量爬虫任务。
+
+
+前端调用方式如下，将headers中跟新tsf和snf参数。
+```javascript
+let ooo = new RequestEncryption({'x': 1, 'y': 2});
+console.info(ooo.getHeaders());
+console.info(JSON.stringify(ooo.getHeaders()));
+```
 
 ```python
 """
 各种flask 扩展
 """
-import os
+import sys
+import time
 import traceback
 import random
 import base64
 import functools
+from pathlib import Path
+from hashlib import md5
 from bson import json_util
 import json
-
 import redis
-from flask import current_app, request, Flask
+
+from flask import current_app, request, Flask, Response
 from flask.globals import _request_ctx_stack
 from cerberus import Validator
+
 from nb_log import LogManager, LoggerMixin
 
 flask_error_logger = LogManager('flask_error').get_logger_and_add_handlers(log_filename='flask_error.log')
 flask_record_logger = LogManager('flask_record').get_logger_and_add_handlers(log_filename='flask_record.log')
 
+env = 'test'
 
-class FlaskIpStatistics():
+
+# e2eb0348734ab106498d2bxxxxxxxxxx   钉钉调试
+
+class FlaskIpStatistics:
     """
     自动统计每个接口的访问情况
     """
@@ -42,8 +62,6 @@ class FlaskIpStatistics():
     def init_app(self, app: Flask):
         if 'REDSI_URL' not in app.config:
             raise LookupError('请在flask的config 配置中指明 REDSI_URL 的连接配置')
-        if 'SHOW_IP_STATISTIC_PATH' not in app.config:
-            raise LookupError('请在flask的config 配置中指明 SHOW_IP_STATISTIC_PATH 的配置,用来返回ip访问情况')
         if 'REDSI_KEY_PREFIX_FOR_STATISTICS' not in app.config:
             raise LookupError('请在flask的config 配置中指明 REDSI_KEY_PREFIX_FOR_STATISTICS 的配置')
         if 'SHOW_IP_STATISTIC_PATH' not in app.config:
@@ -85,6 +103,15 @@ class FlaskIpStatistics():
         return {'count': len(ip__count_map), 'ip__count_map': ip__count_map}
 
 
+def get_request_values():
+    request_values = {}
+    if request.values:
+        request_values = request.values.to_dict()
+    if request.get_data():
+        request_values.update(request.get_json())
+    return request_values
+
+
 def api_return_deco(v):
     """
     对flask的返回 加一个固定的状态码。在测试环境即使是非debug，直接在错误信息中返回错误堆栈。在生产环境使用随机四位字母 加 错误信息的base64作为错误信息。
@@ -92,33 +119,52 @@ def api_return_deco(v):
     :return:
     """
     flask_request = request
+    flask_record_loggerx = current_app.__dict__.get('flask_record_logger', flask_record_logger)
+    flask_error_loggerx = current_app.__dict__.get('flask_error_logger', flask_error_logger)
 
     @functools.wraps(v)
     def _api_return_deco(*args, **kwargs):
         # noinspection PyBroadException
+        request_values = get_request_values()
         try:
             data = v(*args, **kwargs)
+            if isinstance(data, Response):
+                return data
             if isinstance(data, str):
                 result = data
             else:
                 if 'code' in data and 'data' in data:
-                    result = json_util.dumps(data)
+                    result = json_util.dumps(data, ensure_ascii=False)
                 else:
                     result = json_util.dumps({
                         "code": 200,
                         "data": data,
                         "message": "SUCCESS"}, ensure_ascii=False)
-            flask_record_logger.debug(
-                f'请求路径：{flask_request.path}  请求参数：{json.dumps(flask_request.values.to_dict())},返回正常,结果长度是{len(result)}')
+            if len(result) > 1000:
+                record_result = str(result[:1000]) + '\n   。。。  '
+            else:
+                record_result = result
+            flask_record_loggerx.debug(
+                f'''请求路径：{flask_request.path}  
+                请求参数：{json.dumps(request_values)},
+                执行flask视图函数{v.__name__}没有异常,结果长度是： {len(result)}
+                结果是： {record_result}
+                
+                
+                ''')
             return result
         except Exception as e:
-            except_str0 = f'请求路径：{flask_request.path}  请求参数：{json.dumps(flask_request.values.to_dict())} ,出错了 {type(e)} {e} {traceback.format_exc()}'.replace(
-                '\n', '<br>')
-            flask_error_logger.exception(except_str0)
+            except_str0 = f'''请求路径：{flask_request.path}  
+            请求参数：{json.dumps(request_values)} ,
+            出错了,错误类型是: 【{type(e)}】    , 原因是: 【{e}】 
+            {traceback.format_exc()}
+            
+            
+            '''
+            flask_error_loggerx.exception(except_str0)
             exception_str_encode = base64.b64encode(except_str0.encode()).decode().replace('=', '').strip()
-            message = except_str0 if os.environ.get(
-                'IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE') == '1' else f'''
-            {"".join(random.sample("abcdefghijklmnopqrstABCDEFGHIJKLMNOPQRST", 4))}{exception_str_encode}'''
+            message = except_str0.replace('\n',
+                                          '<br>') if env == 'test' else f'''{"".join(random.sample("abcdefghijklmnopqrstABCDEFGHIJKLMNOPQRST", 4))}{exception_str_encode}'''
             return json.dumps({
                 "code": 500,
                 "data": None,
@@ -156,7 +202,7 @@ def _dispatch_request_with_flask_api_result_deco(self):
     return v2(**req.view_args)
 
 
-class CustomFlaskApiConversion(LoggerMixin):
+class CustomFlaskApiConversion000(LoggerMixin):
     """
     自动转化每个接口的返回，自动将各种类型转成code data message格式的json
     """
@@ -171,11 +217,64 @@ class CustomFlaskApiConversion(LoggerMixin):
         Flask.dispatch_request = _dispatch_request_with_flask_api_result_deco
 
     def init_app(self, app: Flask):
-        if 'IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE' not in app.config:
-            self.logger.warning(
-                'flask的config没有配置 IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE，则默认为"0"，使用密文')
-            os.environ.setdefault('IS_RETURN_PYTHON_TRACEBACK_PLAINTEXT_FROM_FLASK_INTERFACE', '0')
         app.before_first_request_funcs.append(self.monkey_patch_dispatch_request)  # 直接把返回装饰器加到app上，免得每个接口加一次装饰器麻烦。
+
+
+class CustomFlaskApiConversion(LoggerMixin):
+    """
+    自动转化每个接口的返回，自动将各种类型转成code data message格式的json
+    """
+
+    def __init__(self, app=None):
+        self.app = app
+        if app is not None:
+            self.init_app(app, )
+
+    @staticmethod
+    def __before_first_request():
+        for endpoint, view_func in current_app.view_functions.items():
+            current_app.view_functions[endpoint] = flask_api_result_deco(view_func)
+
+    def init_app(self, app: Flask):
+        flask_record_log_file_name_from_config = app.config.get('FLASK_RECORD_LOG_FILE_NAME', None)
+        flask_record_log_file_name_default = Path(sys.path[1]).as_posix().split('/')[-1] + '_flask_record.log'
+        if flask_record_log_file_name_from_config:
+            app.flask_record_logger = LogManager(
+                flask_record_log_file_name_from_config.split('.')[0]).get_logger_and_add_handlers(
+                log_filename=flask_record_log_file_name_from_config)
+            self.logger.info(f'flask的正常请求记录将记录在  /pythonlogs/{flask_record_log_file_name_from_config} 文件中 ')
+        else:
+            app.flask_record_logger = LogManager(
+                flask_record_log_file_name_default.split('.')[0]).get_logger_and_add_handlers(
+                log_filename=flask_record_log_file_name_default)
+            self.logger.info(f'flask的正常请求记录将记录在  /pythonlogs/{flask_record_log_file_name_default} 文件中 ')
+            self.logger.warning(f'也可以手动配置flask的正常请求记录日志文件名字，请指定 FLASK_RECORD_LOG_FILE_NAME')
+
+        flask_error_log_file_name_from_config = app.config.get('FLASK_ERROR_LOG_FILE_NAME', None)
+        flask_error_log_file_name_default = Path(sys.path[1]).as_posix().split('/')[-1] + '_flask_error.log'
+        if flask_error_log_file_name_from_config:
+            logger_error_name = flask_error_log_file_name_from_config.split('.')[0] + (app.config[
+                                                                                           'DING_TALK_KEYWORD'] if app.config.get(
+                'FLASK_ERROR_DING_TALK_TOKEN', None) else '')
+            # logger_dingtalk_debug.debug(logger_error_name)
+            app.flask_error_logger = LogManager(
+                logger_error_name).get_logger_and_add_handlers(
+                log_filename=flask_error_log_file_name_from_config,
+                ding_talk_token=app.config.get('FLASK_ERROR_DING_TALK_TOKEN', None))
+            self.logger.info(f'''flask错误日志将记录在  /pythonlogs/{flask_error_log_file_name_from_config} 文件中''')
+        else:
+            logger_error_name = flask_error_log_file_name_default.split('.')[0] + (app.config[
+                                                                                       'DING_TALK_KEYWORD'] if app.config.get(
+                'FLASK_ERROR_DING_TALK_TOKEN', None) else '')
+            # logger_dingtalk_debug.debug(logger_error_name)
+            app.flask_error_logger = LogManager(
+                logger_error_name).get_logger_and_add_handlers(
+                log_filename=flask_error_log_file_name_default,
+                ding_talk_token=app.config.get('FLASK_ERROR_DING_TALK_TOKEN', None))
+            self.logger.info(f'''flask错误日志将记录在  /pythonlogs/{flask_error_log_file_name_default} 文件中''')
+            self.logger.warning(f'''也可以手动配置flask的错误记录日志文件名字，请指定 FLASK_ERROR_LOG_FILE_NAME''')
+
+        app.before_first_request_funcs.append(self.__before_first_request)
 
 
 def flask_check_param_deco(schema, ):
@@ -188,14 +287,7 @@ def flask_check_param_deco(schema, ):
     def _check_param_deco(v):
         @functools.wraps(v)
         def ___check_param_deco(*ags, **kwargs):
-            request_values = {}
-            print(request.values)
-            if request.values:
-                request_values = request.values.to_dict()
-            if request.json:
-                request_values.update(request.json)
-            # print(request_values)
-            # print(schema)
+            request_values = get_request_values()
             vd = Validator()
             vd.allow_unknown = True
             # document, schema=None
@@ -215,33 +307,99 @@ def flask_check_param_deco(schema, ):
     return _check_param_deco
 
 
+def flask_request_encrypt_deco(v):
+    """
+    flask请求参数加密，防止被爬
+    前端js文件对应 apiEncr.js
+    :param v:
+    :return:
+    """
+
+    @functools.wraps(v)
+    def _flask_request_encrypt_deco(*args, **kwargs):
+        if 'tsf' not in request.headers:
+            return json.dumps({'code': 476, 'message': '', 'data': None})
+        if 'snf' not in request.headers:
+            return json.dumps({'code': 477, 'message': '', 'data': None})
+        ts = int(request.headers.get('tsf'))
+        snf = request.headers.get('snf')
+        if time.time() - ts > 600 * 1000:
+            return json.dumps({'code': 478, 'message': '', 'data': None})
+        request_values = get_request_values()
+        request_values_list_sorted = sorted(request_values.items(), key=lambda x: x[0])
+        random_bit = int(snf[0])
+        to_be_enc_str = ''
+        end_random_str = snf[-random_bit:]
+        print(end_random_str)
+        for key, value in request_values_list_sorted:
+            to_be_enc_str += f'{key}{end_random_str}{value}'
+        md = md5()
+        md.update(f'{to_be_enc_str}{ts}'.encode())
+        sn = md.hexdigest()
+        if (snf[random_bit + 1:random_bit + 33] == sn and len(snf) == 64) or snf == 'mtfytest':
+            return v(*args, **kwargs)
+        else:
+            return json.dumps({'code': 479, 'message': '', 'data': None})
+
+    return _flask_request_encrypt_deco
+
+
+class FlaskApiEncryption:
+    def __init__(self, app=None):
+        self.app = app
+        if app is not None:
+            self.init_app(app, )
+
+    @staticmethod
+    def __before_first_request():
+        for endpoint, view_func in current_app.view_functions.items():
+            current_app.view_functions[endpoint] = flask_request_encrypt_deco(view_func)
+
+    def init_app(self, app: Flask):
+        app.before_first_request_funcs.append(self.__before_first_request)
+
+
 if __name__ == '__main__':
     schemax = {"x": {'type': 'string', 'empty': False, 'nullable': False, 'required': True}}
 
-    app = Flask(__name__)
-    app.config['REDSI_URL'] = 'redis://127.0.0.1/0'
-    app.config['REDSI_KEY_PREFIX_FOR_STATISTICS'] = 'flask_test1'
-    app.config['SHOW_IP_STATISTIC_PATH'] = '/proj/ip_st'
-    FlaskIpStatistics(app)
-    CustomFlaskApiConversion(app)
+    appx = Flask(__name__)
+    appx.config['REDSI_KEY_PREFIX_FOR_STATISTICS'] = 'flask_test1'
+    appx.config['SHOW_IP_STATISTIC_PATH'] = '/proj/ip_st'
+
+    # appx.config['FLASK_RECORD_LOG_FILE_NAME'] = 'my_flask_proj_record2.log'
+    # appx.config['FLASK_ERROR_LOG_FILE_NAME'] = 'my_flask_proj_error2.log'
+    appx.config['FLASK_ERROR_DING_TALK_TOKEN'] = 'e2eb0348734ab106498d2b4e2e93xxxxxxx'
+    appx.config['DING_TALK_KEYWORD'] = '钉钉调试'  # 钉钉机器人的关键字模式发送消息
+
+    FlaskIpStatistics(appx)
+    CustomFlaskApiConversion(appx)
+    FlaskApiEncryption(appx)
 
 
-    @app.route('/', methods=['get'])
+    @appx.route('/', methods=['get'])
     def index():
         return 'hello'
 
 
-    @app.route('/list', methods=['get', 'post'])
+    @appx.route('/list', methods=['get', 'post'])
     @flask_check_param_deco(schemax, )
     def listx():
         """
         {"code": 200, "data": ["dsd"], "message": "SUCCESS"}
         :return:
         """
+        1 / 0
         return ['dsd', 'lalala']  # 可以直接返回字典 和列表类型，不需要json dumps。
 
 
-    app.run()
+    @appx.route('/jm', methods=['get'])
+    @flask_request_encrypt_deco
+    def encr_test():
+        return [1, 2, 3]
+
+
+    appx.run('0.0.0.0', port=6358)
+
 
 
 ``` 
