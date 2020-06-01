@@ -1,16 +1,17 @@
-## 1. pip install flask_ext_ydf
+##  pip install flask_ext_ydf
 
-1.自动使用redis统计每个ip和每个接口的访问次数
+###1.自动使用redis统计每个ip和每个接口的访问次数
 
-2.自动返回code  data message 三个字段格式的json。
+###2.自动返回code  data message 三个字段格式的json。
 兼容flask接口已经返回了完整json和返回 列表 数组
 
-3.使用装饰器做参数校验，校验格式使用cerberus包的语法。
+###3.使用装饰器做参数校验，校验格式使用cerberus包的语法。
 
-4.自动加密任意请求参数的接口,兼容get post表单 postjson。前端需要配合js文件apiEncr，后端使用相同逻辑验证。
+###4.自动加密任意请求参数的接口,兼容get传参 post表单传参 postj son传参。
+
+前端需要配合js文件apiEncr，后端使用相同逻辑验证。
 
 如果不通过，则拒绝请求，避免后端web处理大量爬虫任务。
-
 
 前端调用方式如下，将headers中跟新tsf和snf参数。
 ```javascript
@@ -19,9 +20,9 @@ console.info(ooo.getHeaders());
 console.info(JSON.stringify(ooo.getHeaders()));
 ```
 
-5.自动日志记录，错误日志和正常日志自动记录到不同文件
+###5.自动日志记录，错误日志和正常日志自动记录到不同文件
 
-配置钉钉后，函数运行出错可以钉钉自动空频报警。
+配置钉钉后，函数运行出错可以钉钉自动控频报警。
 
 
 
